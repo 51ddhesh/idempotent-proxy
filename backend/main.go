@@ -14,6 +14,6 @@ func main() {
 		w.Write([]byte("Request processed successfully\n"))
 	})
 
-	fmt.Println("BACKEND: Running on localhost:8081")
+	fmt.Println("[BACKEND]: Running on localhost:8081")
 	log.Fatal(http.ListenAndServe(":8081", nil))
 }
