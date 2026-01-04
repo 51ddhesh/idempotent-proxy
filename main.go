@@ -53,8 +53,37 @@ func main() {
 	}
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("[PROXY]: Intercepted request to: %s\n", r.URL.Path)
+		idempotencyKey := r.Header.Get("X-Idempotency-Key")
 
+		if idempotencyKey == "" {
+			log.Printf("[PROXY]: Passthrough (No Key) -> %s\n", r.URL.Path)
+			proxy.ServeHTTP(w, r)
+			return
+		}
+
+		log.Printf("[PROXY]: Idempotency Key found: %s\n", idempotencyKey)
+		redisKey := "idem:" + idempotencyKey
+
+		ctx := context.Background()
+
+		success, err := rdb.SetNX(ctx, redisKey, "IN_PROGRESS", 30*time.Second).Result()
+
+		if err != nil {
+			log.Printf("[PROXY]: Redis Error: %v\n", err)
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+
+		if !success {
+			log.Printf("[PROXY]: Duplicate request blocked for key: %s\n", idempotencyKey)
+			w.WriteHeader(http.StatusConflict)
+			w.Write([]byte("409 Conflict: Request already in progress or completed\n"))
+			return
+		}
+
+		log.Printf("[PROXY]: Lock acquired. Forwarding to backend\n")
+
+		// TODO: Capture response and save it
 		proxy.ServeHTTP(w, r)
 	})
 
