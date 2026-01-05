@@ -165,6 +165,26 @@ func main() {
 
 			log.Printf("[PROXY]: Lock acquired. Forwarding to backend\n")
 
+			wdCtx, wdCancel := context.WithCancel(context.Background())
+			defer wdCancel()
+
+			go func() {
+				ticker := time.NewTicker(10 * time.Second)
+				defer ticker.Stop()
+
+				for {
+					select {
+					case <-wdCtx.Done():
+						log.Printf("[PROXY::WATCHDOG]: Request Done. Stopping watchdog for %s\n", idempotencyKey)
+						return
+
+					case <-ticker.C:
+						log.Printf("[PROXY::WATCHDOG]: Extending lock for %s\n", idempotencyKey)
+						rdb.Expire(context.Background(), redisKey, 30*time.Second)
+					}
+				}
+			}()
+
 			proxy.ServeHTTP(w, r)
 			return
 		}
