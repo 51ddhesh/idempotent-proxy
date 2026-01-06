@@ -1,0 +1,9 @@
+FROM golang:1.24.1-alpine
+
+WORKDIR /app
+
+COPY backend/ ./backend/
+COPY go.mod ./
+COPY go.sum ./
+
+CMD ["go", "run", "backend/main.go"]

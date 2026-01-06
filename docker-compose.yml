@@ -5,3 +5,21 @@ services:
     ports:
       - "6379:6379"
     restart: always
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: idemproxy_backend
+
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.5.0
+    container_name: idemproxy_toxi
+    ports:
+      # Control API (Where we send commands like "Add Latency")
+      - "8474:8474" 
+      # The Proxy Port (We will route traffic through here)
+      - "8082:8082" 
+    # Allow Toxiproxy to talk to your host machine (where backend is running)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
