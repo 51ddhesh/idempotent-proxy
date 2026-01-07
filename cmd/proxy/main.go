@@ -20,6 +20,10 @@ func main() {
 	targetURL, _ := url.Parse("http://localhost:8082")
 
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
+	proxy.Transport = &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 100,
+	}
 	proxy.ModifyResponse = service.ResponseHook
 
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, e error) {
