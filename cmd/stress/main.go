@@ -29,8 +29,7 @@ func main() {
 	fmt.Printf("Mode:               %s\n", *mode)
 	fmt.Printf("Reqs:               %d\n", *requests)
 	fmt.Printf("Concurrent Workers: %d\n", *concurrency)
-	fmt.Printf("-----------------------------------------------------------------------------\n")
-
+	fmt.Printf("-------------------------------------------\n")
 	start := time.Now()
 
 	var wg sync.WaitGroup
