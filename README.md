@@ -115,6 +115,23 @@ curl -v -H "X-Idempotency-Key: fail_test" http://localhost:8080/
 **C. Retry (Success):**
 Running the request again will *not* return `409 Conflict`, but will attempt to process again. This proves the system correctly handles partial failures.
 
+## Stress Testing
+**ENSURE THAT DOCKER IS RUNNING THE BACKEND**
+```bash
+# In the first terminal, start the proxy
+go run cmd/proxy/main.go
+```
+1. Run a test with 1000 concurrent connections
+```bash
+# In the second terminal, start the test 
+make stress-throughput
+```
+
+2. Run a contention test with 20 concurrent connections hitting the backend with the same key.
+```bash
+make stress-contention
+```
+
 ## Design Decisions
 
 1.  **Atomic Locking:** Used Redis `SETNX` to prevent race conditions where two requests check for existence at the exact same millisecond.
