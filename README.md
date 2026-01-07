@@ -139,6 +139,6 @@ make stress-contention
 3.  **Fail-Open vs Fail-Closed:** Currently configured to `Fail-Closed` on Redis errors (return 500). In a payment system, it is safer to fail than to process a payment twice.
 
 ## Future Improvements
-*   **Redis Lua Scripts:** To make the "Check and Set" operation purely atomic in a single network round-trip.
-*   **Request Hash Validation:** Ensure the payload of the second request matches the first request (preventing key reuse for different operations).
-*   **Metrics:** Add Prometheus metrics for Lock Contentions and Cache Hits.
+- [x]  **Redis Lua Scripts:** To make the "Check and Set" operation purely atomic in a single network round-trip.
+- [ ]  **Request Hash Validation:** Ensure the payload of the second request matches the first request (preventing key reuse for different operations).
+- [ ]  **Metrics:** Add Prometheus metrics for Lock Contentions and Cache Hits.
