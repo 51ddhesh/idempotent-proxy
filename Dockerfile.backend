@@ -1,9 +1,19 @@
-FROM golang:1.24.1-alpine
+FROM golang:1.24.1-alpine AS builder
 
 WORKDIR /app
 
-COPY backend/ ./backend/
-COPY go.mod ./
-COPY go.sum ./
+COPY go.mod go.sum ./
 
-CMD ["go", "run", "backend/main.go"]
+RUN go mod download
+
+COPY backend/ ./backend/
+
+ENV CGO_ENABLED=0
+RUN go build -o backend-bin ./backend/main.go
+
+FROM alpine:latest
+WORKDIR /root/
+COPY --from=builder /app/backend-bin .
+
+EXPOSE 8081
+CMD ["./backend-bin"]
