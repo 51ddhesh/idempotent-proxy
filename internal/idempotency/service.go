@@ -17,6 +17,30 @@ const (
 	WatchdogTick = 10 * time.Second
 )
 
+// Lua scripts
+
+// check for existence and sets lock in one atomic step
+const luaLock = `
+local val = redis.call("GET", KEYS[1])
+if val then
+	return val -- hit
+end
+-- key missing, acquire lock
+redis.call("SET", KEYS[1], ARGV[1], "EX", ARGV[2])
+return nil
+`
+
+// only extend TTL if value is "IN_PROGRESS"
+// this prevents overwriting a 24H cache with 30s lock
+const luaExtend = `
+local val = redis.call("GET", KEYS[1])
+if val == ARGV[1] then
+	redis.call("EXPIRE", KEYS[1], ARGV[2])	
+	return 1
+end
+return 0
+`
+
 type CachedResponse struct {
 	StatusCode int         `json:"status_code"`
 	Headers    http.Header `json:"headers"`
@@ -44,9 +68,17 @@ func (s *Service) Middleware(next http.Handler) http.Handler {
 
 		ctx := r.Context()
 
-		val, err := s.rdb.Get(ctx, redisKey).Result()
+		// atomic check and lock
+		res, err := s.rdb.Eval(ctx, luaLock, []string{redisKey}, "IN_PROGRESS", int(LockTTL.Seconds())).Result()
 
-		if err == nil {
+		if err != nil && err != redis.Nil {
+			log.Printf("[SERVICE]: Redis Error: %v", err)
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+
+		if res != nil {
+			val := res.(string)
 			if val == "IN_PROGRESS" {
 				w.WriteHeader(http.StatusConflict)
 				w.Write([]byte("[PROXY]: 409 Conflict: Request in progress\n"))
@@ -56,22 +88,12 @@ func (s *Service) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		if err == redis.Nil {
-			if !s.acquireLock(ctx, redisKey) {
-				w.WriteHeader(http.StatusConflict)
-				return
-			}
+		wdCtx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
-			wdCtx, cancel := context.WithCancel(context.Background())
-			defer cancel()
+		go s.startWatchdog(wdCtx, redisKey)
 
-			go s.startWatchdog(wdCtx, redisKey)
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		log.Printf("[SERVICE]: Redis Error: %v", err)
-		http.Error(w, "[SERIVCE]: Internal Server Error", http.StatusInternalServerError)
+		next.ServeHTTP(w, r)
 	})
 }
 
@@ -101,7 +123,11 @@ func (s *Service) ResponseHook(resp *http.Response) error {
 		Body:       bodyBytes,
 	}
 
-	jsonData, _ := json.Marshal(cached)
+	jsonData, err := json.Marshal(cached)
+
+	if err != nil {
+		return err
+	}
 
 	s.rdb.Set(context.Background(), "idem:"+key, jsonData, CacheTTL)
 	log.Printf("[SERVICE::IDEMPOTENCY]: Saved response for %s", key)
@@ -128,11 +154,6 @@ func (s *Service) serveCache(w http.ResponseWriter, val string) {
 	w.Write(data.Body)
 }
 
-func (s *Service) acquireLock(ctx context.Context, key string) bool {
-	success, _ := s.rdb.SetNX(ctx, key, "IN_PROGRESS", LockTTL).Result()
-	return success
-}
-
 func (s *Service) startWatchdog(ctx context.Context, key string) {
 	ticker := time.NewTicker(WatchdogTick)
 	defer ticker.Stop()
@@ -143,8 +164,12 @@ func (s *Service) startWatchdog(ctx context.Context, key string) {
 			return
 
 		case <-ticker.C:
-			log.Printf("[SERVICE::WATCHDOG]: Extending lock for %s", key)
-			s.rdb.Expire(context.Background(), key, LockTTL)
+			err := s.rdb.Eval(context.Background(), luaExtend, []string{key}, "IN_PROGRESS", int(LockTTL.Seconds())).Err()
+			if err != nil {
+				log.Printf("[SERVICE::WATCHDOG]: Error extending the lock: %v\n", err)
+			} else {
+				log.Printf("[SERVICE::WATCHDOG]: Extending the lock for %s\n", key)
+			}
 		}
 	}
 }
