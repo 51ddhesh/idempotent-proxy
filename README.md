@@ -1,66 +1,81 @@
 # IdemProxy: Distributed Idempotency Sidecar
 
-**A high-performance Reverse Proxy written in Go that guarantees "Exactly-Once" execution for API requests.**
+A high-performance Reverse Proxy written in Go that guarantees "Exactly-Once" execution for API requests.
 
-![Go](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go)
+![Go](https://img.shields.io/badge/Go-1.24+-00ADD8?style=flat&logo=go)
 ![Redis](https://img.shields.io/badge/Redis-Distributed_Lock-DC382D?style=flat&logo=redis)
 ![Docker](https://img.shields.io/badge/Docker-Containerized-2496ED?style=flat&logo=docker)
 
-
-## The Problem (Why this exists)
+## The Problem
 In distributed systems (like Payments), network failures are inevitable.
 1.  **Scenario:** A client requests a $50 charge.
 2.  **Failure:** The server processes the charge, but the internet cuts out before the response reaches the client.
-3.  **Retry:** The client (or user) clicks "Pay" again.
-4.  **Result:** **Double Charge.**
+3.  **Retry:** The client clicks "Pay" again.
+4.  **Result:** Double Charge.
 
-**IdemProxy** sits between the Client and the Backend to prevent this. It enforces **Idempotency** using Distributed Locking and Response Caching.
+**IdemProxy** sits between the Client and the Backend to prevent this. It enforces Idempotency using Distributed Locking and Response Caching.
 
 ## Architecture & Logic
+
 ### The Flow
-1.  **Interception:** The Proxy intercepts every HTTP request.
-2.  **Identification:** It checks for an `X-Idempotency-Key` header.
-3.  **Distributed Lock (Redis `SETNX`):**
-    *   **If Key exists (Completed):** Return the cached JSON response immediately. **(Circuit Breaker)**.
-    *   **If Key exists (In Progress):** Return `409 Conflict` to prevent race conditions.
-    *   **If New:** Acquire a lock with a TTL (Time-To-Live) and forward the request to the backend.
-4.  **The Watchdog (Heartbeat):**
-    *   A background Goroutine spins up to "ping" Redis every 10 seconds, extending the Lock TTL.
-    *   *Why?* This ensures that if the Backend takes 45s to process a request, the 30s lock doesn't expire, preventing a second request from slipping through.
-5.  **Response Caching:**
-    *   When the Backend responds, the Proxy captures the body, saves it to Redis (24h retention), and serves it to the client.
-
-## Tech Stack
-
-*   **Language:** Go (Golang) - chosen for high concurrency (`goroutines`) and standard library network capabilities.
-*   **Store:** Redis - used for atomic locking (`SETNX`) and fast K/V caching.
-*   **Infrastructure:** Docker & Docker Compose.
+1.  **Interception:** The Proxy intercepts every HTTP request checking for an `X-Idempotency-Key` header.
+2.  **Distributed Lock (Redis SETNX):**
+    *   **Cache Hit:** If the key exists and is `COMPLETED`, return the saved JSON response immediately. The backend is never touched.
+    *   **In Progress:** If the key exists but is `IN_PROGRESS`, return `409 Conflict` to prevent race conditions.
+    *   **New Request:** Acquire a lock with a TTL (Time-To-Live) and forward the request.
+3.  **The Watchdog (Heartbeat):**
+    *   A background Goroutine "pings" Redis every 10 seconds to extend the Lock TTL.
+    *   *Why?* Ensures that if the Backend takes 45s to process a request, the 30s lock doesn't expire, preventing a second request from slipping through.
+4.  **Fault Tolerance:**
+    *   If the network cuts out (`EOF`), the Proxy detects the failure and releases the lock immediately, allowing the client to retry safely.
 
 ## Getting Started
 
 ### Prerequisites
-*   Go 1.21+
+*   Go 1.24.1+
 *   Docker & Docker Compose
+*   Make
 
-### 1. Start Infrastructure (Redis + Toxiproxy)
+### Automated Testing (Recommended)
+This project includes a comprehensive integration test suite that spins up the infrastructure, configures network proxies, and runs resilience tests.
+
+**Run the full suite (Infrastructure + Tests):**
 ```bash
-docker-compose up -d
+make test
 ```
 
-### 2. Run the Mock Backend
-This mimics a payment service. It has a `/slow` endpoint to simulate long-running jobs.
+**Run tests only (Fast Mode):**
+Use this if Docker is already running and you are iterating on the Go code.
 ```bash
-go run backend/main.go
-# Runs on localhost:8081
+make test-only
 ```
 
-### 3. Run the Proxy
-```bash
-go run cmd/proxy/main.go
-# Runs on localhost:8080 (Proxies traffic to :8081 via :8082)
-```
+**What the test suite does:**
+1.  **Environment Setup:** Configures Docker services and Toxiproxy routes.
+2.  **Scenario A (Idempotency):** Validates atomic locking and response caching.
+3.  **Scenario B (Watchdog):** Validates lock extension for long-running jobs (45s+).
+4.  **Scenario C (Chaos):** Injects network faults (EOF) to ensure locks are released safely ("Fail Open").
 
-## Testing 
+### Manual Operation
+If you prefer to run components individually for development:
+
+1.  **Start Infrastructure:**
+    ```bash
+    make up
+    ```
+2.  **Run Proxy:**
+    ```bash
+    go run cmd/proxy/main.go
+    ```
+3.  **Stop Infrastructure:**
+    ```bash
+    make down
+    ```
+
+## Manual Verification Scenarios
+
+You can verify the system's resilience manually using `curl`.
+
 ### 1. The "Double Charge" Protection
 Send a request with a key, then immediately send it again.
 ```bash
@@ -82,14 +97,29 @@ curl -v -H "X-Idempotency-Key: slow_job_1" http://localhost:8080/slow
 # Result: 409 Conflict (Lock successfully extended)
 ```
 
+### 3. Network Failure (Toxiproxy)
+Simulate a "Cable Cut" where the connection drops halfway through the response.
 
-## Design Decisions & Trade-offs
+**A. Add the Toxic:**
+```bash
+curl -X POST -d '{"name":"cut_cable","type":"limit_data","attributes":{"bytes":10}}' \
+http://localhost:8474/proxies/backend_pipe/toxics
+```
 
-1.  **Atomic Locking:** Used Redis `SETNX` instead of standard `SET` to prevent race conditions where two requests check for existence at the exact same millisecond.
-2.  **The Watchdog Pattern:** Implemented a `time.Ticker` inside a Goroutine to handle lock extension. This is preferable to setting a massive TTL (which creates zombie locks if the server crashes).
+**B. Send Request:**
+```bash
+curl -v -H "X-Idempotency-Key: fail_test" http://localhost:8080/
+# Result: 502 Bad Gateway (Proxy detects failure and DELETEs the lock)
+```
+
+**C. Retry (Success):**
+Running the request again will *not* return `409 Conflict`, but will attempt to process again. This proves the system correctly handles partial failures.
+
+## Design Decisions
+
+1.  **Atomic Locking:** Used Redis `SETNX` to prevent race conditions where two requests check for existence at the exact same millisecond.
+2.  **The Watchdog Pattern:** Implemented a `time.Ticker` inside a Goroutine. This is preferable to setting a massive TTL (which creates zombie locks if the server crashes).
 3.  **Fail-Open vs Fail-Closed:** Currently configured to `Fail-Closed` on Redis errors (return 500). In a payment system, it is safer to fail than to process a payment twice.
-
----
 
 ## Future Improvements
 *   **Redis Lua Scripts:** To make the "Check and Set" operation purely atomic in a single network round-trip.
